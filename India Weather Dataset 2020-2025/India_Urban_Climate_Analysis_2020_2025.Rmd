@@ -1,0 +1,653 @@
+---
+title: "India Urban Climate Analysis 2020–2025"
+author: "Brian Kipchumba"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+# Business Understanding
+
+India's diverse topography means weather patterns vary drastically across 
+cities — from the snow-capped hills of Shimla to the tropical coast of Chennai. 
+Understanding these climate patterns is critical for urban planning, agriculture, 
+disaster preparedness, and environmental policy.
+
+**Objectives:**
+
+- Explore climate trends across 98 Indian cities from 2020 to 2025
+- Analyze seasonal patterns in temperature, rainfall, and wind speed
+- Compare climate conditions across geographic regions
+- Identify anomalies and extreme weather events
+- Forecast future temperature trends using time series models
+
+---
+
+# Data Understanding
+
+## Load Libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(scales)
+library(viridis)
+library(corrplot)
+library(forecast)
+library(tseries)
+library(gridExtra)
+library(ggthemes)
+```
+
+## Load Dataset
+
+```{r load-data, message=FALSE, warning=FALSE}
+df <- read_csv("Data/popular_cities_weather.csv")
+cat("Rows:", nrow(df), "\n")
+cat("Columns:", ncol(df), "\n")
+cat("Cities:", n_distinct(df$city), "\n")
+cat("Date Range:", as.character(min(df$date)),
+    "to", as.character(max(df$date)), "\n")
+```
+
+## Preview Data
+```{r preview, message=FALSE, warning=FALSE}
+head(df, 10)
+```
+## Data Structure
+```{r structure, message=FALSE, warning=FALSE}
+glimpse(df)
+```
+
+## Summary Statistics
+
+```{r summary-stats, message=FALSE, warning=FALSE}
+summary(df)
+```
+## 2.6 Missing Values
+
+```{r missing, message=FALSE, warning=FALSE}
+missing_vals <- df %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "Column",
+               values_to = "Missing") %>%
+  mutate(Percentage = round(Missing / nrow(df) * 100, 2))
+
+print(missing_vals)
+
+ggplot(missing_vals, aes(x = reorder(Column, -Percentage), y = Percentage)) +
+  geom_bar(stat = "identity", fill = "#EF5350") +
+  geom_text(aes(label = paste0(Percentage, "%")),
+            vjust = -0.5, size = 3.5) +
+  labs(title = "Missing Values by Column (%)",
+       x = "Column", y = "Missing (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Data Preparation
+
+## Fix Date & Add Features
+
+```{r data-prep, message=FALSE, warning=FALSE}
+df <- df %>%
+  mutate(
+    date      = as.Date(date),
+    year      = year(date),
+    month     = month(date, label = TRUE),
+    month_num = month(date),
+    season    = case_when(
+      month_num %in% c(12, 1, 2)  ~ "Winter",
+      month_num %in% c(3, 4, 5)   ~ "Summer",
+      month_num %in% c(6, 7, 8)   ~ "Monsoon",
+      month_num %in% c(9, 10, 11) ~ "Post-Monsoon"
+    )
+  )
+
+cat("Season distribution:\n")
+print(table(df$season))
+cat("\nNew shape:", nrow(df), "x", ncol(df), "\n")
+```
+
+## Handle Missing Values
+
+```{r handle-missing, message=FALSE, warning=FALSE}
+# Drop wspd column (100% missing)
+df <- df %>% select(-wspd)
+
+# Fill remaining missing values with city mean
+df <- df %>%
+  group_by(city) %>%
+  mutate(
+    tavg = ifelse(is.na(tavg), mean(tavg, na.rm = TRUE), tavg),
+    tmin = ifelse(is.na(tmin), mean(tmin, na.rm = TRUE), tmin),
+    tmax = ifelse(is.na(tmax), mean(tmax, na.rm = TRUE), tmax),
+    prcp = ifelse(is.na(prcp), 0, prcp),
+    pres = ifelse(is.na(pres), mean(pres, na.rm = TRUE), pres),
+    tsun = ifelse(is.na(tsun), mean(tsun, na.rm = TRUE), tsun)
+  ) %>%
+  ungroup()
+
+cat("Missing values after cleaning:\n")
+print(colSums(is.na(df)))
+cat("\nFinal shape:", nrow(df), "x", ncol(df), "\n")
+cat("Data preparation complete!\n")
+```
+## Fix Remaining tsun Missing Values
+
+```{r fix-tsun, message=FALSE, warning=FALSE}
+# Replace remaining tsun NAs with overall mean
+df <- df %>%
+  mutate(tsun = ifelse(is.na(tsun), mean(tsun, na.rm = TRUE), tsun))
+
+cat("Missing values after final cleaning:\n")
+print(colSums(is.na(df)))
+cat("\nFinal shape:", nrow(df), "x", ncol(df), "\n")
+```
+---
+
+# Temperature Analysis
+
+## National Average Temperature Trend
+
+```{r temp-trend, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+temp_trend <- df %>%
+  group_by(date) %>%
+  summarise(avg_temp = mean(tavg, na.rm = TRUE), .groups = "drop")
+
+ggplot(temp_trend, aes(x = date, y = avg_temp)) +
+  geom_line(color = "#EF5350", linewidth = 1) +
+  geom_smooth(method = "loess", se = TRUE, 
+              color = "#1565C0", fill = "#BBDEFB") +
+  labs(title = "National Average Temperature Trend (2020–2025)",
+       x = "Date", y = "Average Temperature (°C)") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+The chart shows clear seasonal temperature cycles across India from 2020 to 2025.
+Temperatures peak during **Summer (March–May)** reaching up to 32°C and drop 
+during **Winter (December–February)** to around 20°C. The smooth blue trend line 
+shows a slight overall warming pattern over the 5-year period.
+
+## Monthly Temperature Distribution
+
+```{r monthly-temp, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+ggplot(df, aes(x = month, y = tavg, fill = month)) +
+  geom_boxplot(show.legend = FALSE, outlier.alpha = 0.3) +
+  scale_fill_viridis_d(option = "C") +
+  labs(title = "Monthly Temperature Distribution Across All Cities",
+       x = "Month", y = "Average Temperature (°C)") +
+  theme_minimal()
+```
+Temperatures rise steadily from **January** peaking in **May–July** around 30°C 
+across all cities. **December and January** show the widest spread, reflecting 
+the contrast between cold northern cities like Shimla and warm southern 
+cities like Chennai during winter.
+
+## Top 10 Hottest & Coldest Cities
+
+```{r hot-cold, message=FALSE, warning=FALSE, fig.width=12, fig.height=6}
+city_temp <- df %>%
+  group_by(city) %>%
+  summarise(avg_temp = mean(tavg, na.rm = TRUE), .groups = "drop")
+
+top_hot  <- city_temp %>% slice_max(avg_temp, n = 10)
+top_cold <- city_temp %>% slice_min(avg_temp, n = 10)
+
+p1 <- ggplot(top_hot, aes(x = reorder(city, avg_temp), y = avg_temp)) +
+  geom_bar(stat = "identity", fill = "#EF5350") +
+  geom_text(aes(label = round(avg_temp, 1)), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "Top 10 Hottest Cities", x = "", y = "Avg Temp (°C)") +
+  theme_minimal()
+
+p2 <- ggplot(top_cold, aes(x = reorder(city, -avg_temp), y = avg_temp)) +
+  geom_bar(stat = "identity", fill = "#42A5F5") +
+  geom_text(aes(label = round(avg_temp, 1)), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "Top 10 Coldest Cities", x = "", y = "Avg Temp (°C)") +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+**Hottest cities** are concentrated in South India — coastal and inland cities 
+like Tiruchirappalli and Kozhikode maintain high temperatures year-round due 
+to their tropical location. **Coldest cities** are in North India — Srinagar 
+and Shimla are hill stations with significantly lower average temperatures 
+due to high altitude.
+
+##  Seasonal Temperature Analysis
+
+```{r seasonal-temp, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+df %>%
+  group_by(season) %>%
+  summarise(
+    Average = mean(tavg, na.rm = TRUE),
+    Minimum = mean(tmin, na.rm = TRUE),
+    Maximum = mean(tmax, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(Average, Minimum, Maximum),
+               names_to = "type", values_to = "temp") %>%
+  ggplot(aes(x = season, y = temp, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = round(temp, 1)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("#42A5F5", "#66BB6A", "#EF5350")) +
+  labs(title = "Average Temperature by Season",
+       x = "Season", y = "Temperature (°C)", fill = "Type") +
+  theme_minimal()
+```
+**Summer** records the highest maximum temperatures (35.2°C) while **Winter** 
+has the lowest minimum (14.9°C). **Monsoon** maintains warm average temperatures 
+despite heavy rainfall. The temperature range is widest in Winter reflecting 
+the contrast between northern and southern cities.
+---
+
+#  Rainfall Analysis
+
+## Monthly Rainfall Pattern
+
+```{r rainfall-monthly, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+df %>%
+  group_by(month, month_num) %>%
+  summarise(avg_rain = mean(prcp, na.rm = TRUE), .groups = "drop") %>%
+  arrange(month_num) %>%
+  ggplot(aes(x = month, y = avg_rain, fill = avg_rain)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_c(option = "B") +
+  labs(title = "Average Monthly Rainfall Across All Cities",
+       x = "Month", y = "Average Rainfall (mm)", fill = "Rain (mm)") +
+  theme_minimal()
+```
+Rainfall is heavily concentrated in the **Monsoon months (June–September)** 
+with July recording the highest average of ~320mm across all cities. 
+The dry season from **January to April** shows near-zero rainfall, 
+confirming India's strong monsoon-driven precipitation pattern.
+
+## Top 10 Wettest Cities
+
+```{r wettest-cities, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+df %>%
+  group_by(city) %>%
+  summarise(total_rain = sum(prcp, na.rm = TRUE), .groups = "drop") %>%
+  slice_max(total_rain, n = 10) %>%
+  ggplot(aes(x = reorder(city, total_rain), y = total_rain)) +
+  geom_bar(stat = "identity", fill = "#1565C0") +
+  geom_text(aes(label = round(total_rain, 0)), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "Top 10 Wettest Cities (Total Rainfall 2020–2025)",
+       x = "", y = "Total Rainfall (mm)") +
+  theme_minimal()
+```
+**Mangalore** is the wettest city with over 25,000mm total rainfall over 
+5 years, followed by **Kozhikode** and several Mumbai metropolitan cities. 
+All top 10 wettest cities are located on India's **western coastal belt**, 
+which receives the heaviest Southwest Monsoon rainfall.
+
+## Rainfall by Season
+
+```{r rainfall-season, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+df %>%
+  group_by(season) %>%
+  summarise(avg_rain = mean(prcp, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = reorder(season, -avg_rain), y = avg_rain, fill = season)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_text(aes(label = round(avg_rain, 1)), vjust = -0.5, size = 4) +
+  scale_fill_manual(values = c("#1565C0", "#EF5350", "#66BB6A", "#FFA726")) +
+  labs(title = "Average Rainfall by Season",
+       x = "Season", y = "Average Rainfall (mm)") +
+  theme_minimal()
+```
+**Monsoon season dominates** with 239.7mm average rainfall — more than 
+double Post-Monsoon. Winter is the driest season with only 17.4mm, 
+confirming that over **58% of India's annual rainfall** comes during 
+the June–September Monsoon period.
+
+---
+
+# Pressure & Correlation Analysis
+
+##  Average Pressure by Month
+
+```{r pressure, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+df %>%
+  group_by(month, month_num) %>%
+  summarise(avg_pres = mean(pres, na.rm = TRUE), .groups = "drop") %>%
+  arrange(month_num) %>%
+  ggplot(aes(x = month, y = avg_pres, group = 1)) +
+  geom_line(color = "#AB47BC", linewidth = 1.2) +
+  geom_point(color = "#AB47BC", size = 3) +
+  labs(title = "Average Atmospheric Pressure by Month",
+       x = "Month", y = "Pressure (hPa)") +
+  theme_minimal()
+```
+Atmospheric pressure follows an **inverse pattern to rainfall** — pressure 
+drops sharply from January to June/July coinciding exactly with the arrival 
+of the Monsoon. The lowest pressure in **June–July (1002 hPa)** corresponds 
+to the peak rainfall months, confirming that low pressure systems drive 
+India's Monsoon precipitation.
+
+## 6.2 Correlation Matrix
+
+```{r correlation, message=FALSE, warning=FALSE, fig.width=8, fig.height=7}
+cor_data <- df %>%
+  select(tavg, tmin, tmax, prcp, pres, tsun) %>%
+  drop_na()
+
+cor_matrix <- cor(cor_data)
+
+corrplot(cor_matrix,
+         method      = "color",
+         type        = "upper",
+         addCoef.col = "black",
+         tl.col      = "black",
+         tl.srt      = 45,
+         title       = "Correlation Matrix of Climate Variables",
+         mar         = c(0, 0, 2, 0))
+```
+Temperature variables are **strongly correlated** with each other (0.94–0.95). 
+The strongest negative correlation is between **minimum temperature and pressure 
+(-0.83)** — as temperatures rise, pressure drops driving Monsoon rainfall. 
+Rainfall and sunshine show a **negative correlation (-0.39)** as expected — 
+rainy months have significantly less sunshine.
+
+---
+
+#  City Comparison
+
+##  Temperature Trends — Major Cities
+
+```{r city-comparison, message=FALSE, warning=FALSE, fig.width=12, fig.height=6}
+major_cities <- c("Mumbai", "Delhi", "Chennai", 
+                  "Kolkata", "Bangalore", "Hyderabad")
+
+df %>%
+  filter(city %in% major_cities) %>%
+  group_by(city, date) %>%
+  summarise(avg_temp = mean(tavg, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = date, y = avg_temp, color = city)) +
+  geom_line(linewidth = 0.8, alpha = 0.8) +
+  scale_color_viridis_d() +
+  labs(title = "Temperature Trends — Major Indian Cities (2020–2025)",
+       x = "Date", y = "Average Temperature (°C)", color = "City") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+**Delhi** shows the most extreme seasonal variation — dropping to 14°C in 
+winter and rising to 34°C in summer. **Mumbai and Chennai** maintain stable 
+temperatures year-round due to their coastal location. **Bangalore** stays 
+the coolest among southern cities due to its high elevation.
+
+# Stationarity Test — Mumbai
+
+```{r stationarity, message=FALSE, warning=FALSE}
+# Extract Mumbai temperature time series
+mumbai_ts <- df %>%
+  filter(city == "Mumbai") %>%
+  arrange(date) %>%
+  pull(tavg)
+
+mumbai_ts <- ts(mumbai_ts, start = c(2020, 1), frequency = 12)
+
+# Plot the time series first
+autoplot(mumbai_ts) +
+  labs(title = "Mumbai Temperature Time Series",
+       x = "Year", y = "Temperature (°C)") +
+  theme_minimal()
+```
+Clear seasonal cycles every year
+No upward/downward drift — confirms stationarity
+
+##  ADF Test (Augmented Dickey-Fuller)
+
+```{r adf-test, message=FALSE, warning=FALSE}
+# ADF Test — tests for stationarity
+# H0: Series is NON-stationary
+# H1: Series IS stationary
+adf_result <- adf.test(mumbai_ts)
+print(adf_result)
+
+cat("\n")
+if (adf_result$p.value < 0.05) {
+  cat("✅ p-value =", round(adf_result$p.value, 4), "\n")
+  cat("✅ Series is STATIONARY — no differencing needed\n")
+} else {
+  cat("❌ p-value =", round(adf_result$p.value, 4), "\n")
+  cat("❌ Series is NON-STATIONARY — differencing needed\n")
+}
+```
+p-value = 0.0243 (less than 0.05)
+Series is STATIONARY — no differencing needed
+
+
+##  ACF & PACF Plots
+
+```{r acf-pacf, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+# ACF and PACF help determine ARIMA parameters
+par(mfrow = c(1, 2))
+acf(mumbai_ts,  main = "ACF — Mumbai Temperature")
+pacf(mumbai_ts, main = "PACF — Mumbai Temperature")
+```
+ACF shows significant spikes at lag 1.0 — strong seasonality
+PACF cuts off quickly — suggests AR terms needed
+
+##  ARIMA Model — Mumbai
+
+```{r arima-mumbai, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+# auto.arima automatically selects best ARIMA parameters
+fit_mumbai <- auto.arima(mumbai_ts, 
+                          seasonal = TRUE,
+                          stepwise = FALSE,
+                          approximation = FALSE)
+
+cat("Best ARIMA Model for Mumbai:\n")
+summary(fit_mumbai)
+```
+
+##  Forecast — Next 12 Months
+
+```{r forecast-mumbai, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+forecast_mumbai <- forecast(fit_mumbai, h = 12)
+
+autoplot(forecast_mumbai) +
+  labs(title = "Mumbai Temperature Forecast — Next 12 Months (2026)",
+       x = "Year", y = "Temperature (°C)") +
+  theme_minimal() +
+  theme(plot.title = element_text(fontface = "bold"))
+```
+
+##  Model Accuracy
+
+```{r accuracy-mumbai, message=FALSE, warning=FALSE}
+acc <- accuracy(fit_mumbai)
+cat("Model Accuracy Metrics:\n")
+print(acc)
+
+cat("\nForecast Values for Next 12 Months:\n")
+print(round(forecast_mumbai$mean, 2))
+```
+The **ARIMA(0,0,0)(2,1,0)[12]** model captures Mumbai's seasonal temperature 
+pattern with high accuracy — **MAPE of only 1.84%** meaning predictions are 
+within 2% of actual values. The 2026 forecast shows peak temperatures of 
+**30.5°C in May** dropping to **25.4°C in January**, consistent with 
+Mumbai's historical seasonal pattern.
+
+# Stationarity Test — Delhi
+
+```{r delhi-stationarity, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+delhi_ts <- df %>%
+  filter(city == "Delhi") %>%
+  arrange(date) %>%
+  pull(tavg)
+
+delhi_ts <- ts(delhi_ts, start = c(2020, 1), frequency = 12)
+
+# Plot Delhi time series
+autoplot(delhi_ts) +
+  labs(title = "Delhi Temperature Time Series",
+       x = "Year", y = "Temperature (°C)") +
+  theme_minimal()
+```
+
+## Delhi ADF Test
+
+```{r delhi-adf, message=FALSE, warning=FALSE}
+adf_delhi <- adf.test(delhi_ts)
+print(adf_delhi)
+
+cat("\n")
+if (adf_delhi$p.value < 0.05) {
+  cat("✅ p-value =", round(adf_delhi$p.value, 4), "\n")
+  cat("✅ Delhi series is STATIONARY — no differencing needed\n")
+} else {
+  cat("❌ p-value =", round(adf_delhi$p.value, 4), "\n")
+  cat("❌ Delhi series is NON-STATIONARY — differencing needed\n")
+}
+```
+
+## 8.8 Delhi ACF & PACF
+
+```{r delhi-acf, message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2))
+acf(delhi_ts,  main = "ACF — Delhi Temperature")
+pacf(delhi_ts, main = "PACF — Delhi Temperature")
+```
+
+## ARIMA Model — Delhi
+
+```{r arima-delhi, message=FALSE, warning=FALSE}
+fit_delhi <- auto.arima(delhi_ts,
+                         seasonal = TRUE,
+                         stepwise = FALSE,
+                         approximation = FALSE)
+
+cat("Best ARIMA Model for Delhi:\n")
+summary(fit_delhi)
+```
+
+##  Delhi Forecast — Next 12 Months
+
+```{r forecast-delhi, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+forecast_delhi <- forecast(fit_delhi, h = 12)
+
+autoplot(forecast_delhi) +
+  labs(title = "Delhi Temperature Forecast — Next 12 Months (2026)",
+       x = "Year", y = "Temperature (°C)") +
+  theme_minimal() +
+  theme(plot.title = element_text(fontface = "bold"))
+```
+The **Delhi ARIMA(0,0,1)(0,1,2)[12]** model forecasts a peak temperature 
+of **33°C in June 2026** dropping sharply to **16°C in December 2026**. 
+The narrow confidence interval (blue shading) indicates high forecast 
+confidence. Delhi's extreme seasonal swing of nearly **20°C** between 
+winter and summer is clearly captured by the model.
+
+## Mumbai vs Delhi Forecast Comparison
+
+```{r compare-forecast, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+mumbai_fc <- as.numeric(forecast_mumbai$mean)
+delhi_fc  <- as.numeric(forecast_delhi$mean)
+months    <- c("Jan","Feb","Mar","Apr","May","Jun",
+               "Jul","Aug","Sep","Oct","Nov","Dec")
+
+forecast_compare <- data.frame(
+  Month  = factor(months, levels = months),
+  Mumbai = mumbai_fc,
+  Delhi  = delhi_fc
+) %>%
+  pivot_longer(cols = c(Mumbai, Delhi),
+               names_to  = "City",
+               values_to = "Temperature")
+
+ggplot(forecast_compare, aes(x = Month, y = Temperature,
+                              color = City, group = City)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("#EF5350", "#1565C0")) +
+  labs(title = "2026 Temperature Forecast — Mumbai vs Delhi",
+       x = "Month", y = "Forecasted Temperature (°C)") +
+  theme_minimal() +
+  theme(plot.title = element_text(fontface = "bold"))
+```
+The comparison chart highlights the fundamental climate difference between 
+the two cities. **Delhi (red)** shows extreme seasonal variation — starting 
+at 13°C in January, peaking at 33°C in June, then dropping back to 16°C 
+in December. **Mumbai (blue)** remains remarkably stable throughout the year, 
+staying between 25°C and 30°C — never too cold, never extreme. This reflects 
+the difference between Delhi's **continental inland climate** and Mumbai's 
+**tropical coastal climate** moderated by the Arabian Sea.
+
+---
+
+# Conclusion & Recommendations
+
+##  Key Findings
+
+This project analyzed monthly climate data for 96 Indian cities from 
+2020 to 2025, covering temperature, rainfall, pressure, and sunshine duration.
+
+**Temperature:**
+
+- India shows strong seasonal temperature cycles with peak temperatures 
+  in **May–June (Summer)** averaging 28.6°C and lowest in 
+  **December–January (Winter)** averaging 20.6°C
+- **Tiruchirappalli and Kozhikode** are the hottest cities (~29°C average)
+- **Srinagar and Shimla** are the coldest cities (14–16°C average)
+- **Delhi** shows the most extreme seasonal variation — 21°C range between 
+  winter and summer
+
+**Rainfall:**
+
+- **Monsoon season (June–September)** dominates rainfall with 239.7mm 
+  average — more than double all other seasons combined
+- **Mangalore** is the wettest city with over 25,000mm total rainfall 
+  over 5 years
+- All top 10 wettest cities are located on India's western coastal belt
+
+**Pressure & Correlation:**
+
+- Atmospheric pressure has a **strong inverse relationship with temperature** 
+  (−0.79) and rainfall (−0.41)
+- Pressure drops to its lowest in **June–July** coinciding exactly with 
+  peak Monsoon rainfall
+- Rainfall and sunshine are **negatively correlated (−0.39)** — rainy 
+  months have significantly less sunshine
+
+**Forecasting:**
+
+- Both Mumbai and Delhi temperature series are **stationary** — confirmed 
+  by ADF test (p < 0.05)
+- **Mumbai ARIMA(0,0,0)(2,1,0)[12]** — MAPE of 1.84% — highly accurate
+- **Delhi ARIMA(0,0,1)(0,1,2)[12]** — MAPE of 2.69% — highly accurate
+- 2026 forecasts show temperatures will follow historical seasonal patterns
+
+##  Recommendations
+
+- **Urban Planning:** Cities with high summer temperatures like Tiruchirappalli 
+  should invest in green cover, water bodies, and heat-resilient infrastructure
+- **Agriculture:** Farmers in rain-dependent regions should use these forecasts 
+  for crop planning especially during irregular Monsoon years
+- **Disaster Preparedness:** Coastal cities like Mumbai, Mangalore, and 
+  Kozhikode should strengthen flood management systems given consistently 
+  high rainfall
+- **Climate Monitoring:** The slight warming trend observed in the national 
+  average temperature warrants closer environmental monitoring and 
+  policy intervention
+
+
+
+*Analysis completed using R 4.5.0 | 
+Data: Indian Cities Weather Dataset 2020–2025*
